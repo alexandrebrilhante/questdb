@@ -190,6 +190,7 @@ public class PropServerConfiguration implements ServerConfiguration {
     private final int defaultSymbolCapacity;
     private final int detachedMkdirMode;
     private final boolean devModeEnabled;
+    private final Set<? extends ConfigPropertyKey> dynamicProperties;
     private final boolean enableTestFactories;
     private final int fileOperationRetryCount;
     private final FilesFacade filesFacade;
@@ -383,6 +384,7 @@ public class PropServerConfiguration implements ServerConfiguration {
     private final boolean sqlParallelFilterEnabled;
     private final boolean sqlParallelFilterPreTouchEnabled;
     private final boolean sqlParallelGroupByEnabled;
+    private final boolean sqlParallelReadParquetEnabled;
     private final int sqlParallelWorkStealingThreshold;
     private final int sqlParquetFrameCacheCapacity;
     private final int sqlQueryRegistryPoolSize;
@@ -598,11 +600,12 @@ public class PropServerConfiguration implements ServerConfiguration {
             Properties properties,
             @Nullable Map<String, String> env,
             Log log,
-            final BuildInformation buildInformation
+            BuildInformation buildInformation
     ) throws ServerConfigurationException, JsonException {
         this(
                 root,
                 properties,
+                null,
                 env,
                 log,
                 buildInformation,
@@ -616,9 +619,10 @@ public class PropServerConfiguration implements ServerConfiguration {
     public PropServerConfiguration(
             String root,
             Properties properties,
+            @Nullable Set<? extends ConfigPropertyKey> dynamicProperties,
             @Nullable Map<String, String> env,
             Log log,
-            final BuildInformation buildInformation,
+            BuildInformation buildInformation,
             FilesFacade filesFacade,
             MicrosecondClock microsecondClock,
             FactoryProviderFactory fpf
@@ -626,6 +630,7 @@ public class PropServerConfiguration implements ServerConfiguration {
         this(
                 root,
                 properties,
+                dynamicProperties,
                 env,
                 log,
                 buildInformation,
@@ -641,7 +646,32 @@ public class PropServerConfiguration implements ServerConfiguration {
             Properties properties,
             @Nullable Map<String, String> env,
             Log log,
-            final BuildInformation buildInformation,
+            BuildInformation buildInformation,
+            FilesFacade filesFacade,
+            MicrosecondClock microsecondClock,
+            FactoryProviderFactory fpf
+    ) throws ServerConfigurationException, JsonException {
+        this(
+                root,
+                properties,
+                null,
+                env,
+                log,
+                buildInformation,
+                filesFacade,
+                microsecondClock,
+                fpf,
+                true
+        );
+    }
+
+    public PropServerConfiguration(
+            String root,
+            Properties properties,
+            @Nullable Set<? extends ConfigPropertyKey> dynamicProperties,
+            @Nullable Map<String, String> env,
+            Log log,
+            BuildInformation buildInformation,
             FilesFacade filesFacade,
             MicrosecondClock microsecondClock,
             FactoryProviderFactory fpf,
@@ -656,13 +686,13 @@ public class PropServerConfiguration implements ServerConfiguration {
         final String logTimestampFormatStr = getString(properties, env, PropertyKey.LOG_TIMESTAMP_FORMAT, "yyyy-MM-ddTHH:mm:ss.SSSUUUz");
         final String logTimestampLocaleStr = getString(properties, env, PropertyKey.LOG_TIMESTAMP_LOCALE, "en");
         this.logTimestampLocale = DateLocaleFactory.INSTANCE.getLocale(logTimestampLocaleStr);
-        if (this.logTimestampLocale == null) {
+        if (logTimestampLocale == null) {
             throw new ServerConfigurationException("Invalid log locale: '" + logTimestampLocaleStr + "'");
         }
         TimestampFormatCompiler formatCompiler = new TimestampFormatCompiler();
         this.logTimestampFormat = formatCompiler.compile(logTimestampFormatStr);
         try {
-            this.logTimestampTimezoneRules = Timestamps.getTimezoneRules(this.logTimestampLocale, logTimestampTimezone);
+            this.logTimestampTimezoneRules = Timestamps.getTimezoneRules(logTimestampLocale, logTimestampTimezone);
         } catch (NumericException e) {
             throw new ServerConfigurationException("Invalid log timezone: '" + logTimestampTimezone + "'");
         }
@@ -671,6 +701,7 @@ public class PropServerConfiguration implements ServerConfiguration {
         this.microsecondClock = microsecondClock;
         this.validator = newValidator();
         this.staticContentProcessorConfiguration = new PropStaticContentProcessorConfiguration();
+        this.dynamicProperties = dynamicProperties;
         boolean configValidationStrict = getBoolean(properties, env, PropertyKey.CONFIG_VALIDATION_STRICT, false);
         validateProperties(properties, configValidationStrict);
 
@@ -906,6 +937,14 @@ public class PropServerConfiguration implements ServerConfiguration {
             boolean httpServerCookiesEnabled = getBoolean(properties, env, PropertyKey.HTTP_SERVER_KEEP_ALIVE, true);
             boolean httpReadOnlySecurityContext = getBoolean(properties, env, PropertyKey.HTTP_SECURITY_READONLY, false);
 
+            // maintain deprecated property name for the time being
+            this.httpNetConnectionLimit = getInt(properties, env, PropertyKey.HTTP_NET_ACTIVE_CONNECTION_LIMIT, 256);
+            this.httpNetConnectionLimit = getInt(properties, env, PropertyKey.HTTP_NET_CONNECTION_LIMIT, httpNetConnectionLimit);
+
+            int httpJsonQueryConnectionLimit = getInt(properties, env, PropertyKey.HTTP_JSON_QUERY_CONNECTION_LIMIT, -1);
+            int httpIlpConnectionLimit = getInt(properties, env, PropertyKey.HTTP_ILP_CONNECTION_LIMIT, -1);
+            validateHttpConnectionLimits(httpJsonQueryConnectionLimit, httpIlpConnectionLimit, httpNetConnectionLimit);
+
             httpContextConfiguration = new PropHttpContextConfiguration(
                     connectionPoolInitialCapacity,
                     connectionStringPoolCapacity,
@@ -921,7 +960,9 @@ public class PropServerConfiguration implements ServerConfiguration {
                     isReadOnlyInstance,
                     multipartHeaderBufferSize,
                     multipartIdleSpinCount,
-                    requestHeaderBufferSize
+                    requestHeaderBufferSize,
+                    httpJsonQueryConnectionLimit,
+                    httpIlpConnectionLimit
             );
 
             // Use a separate configuration for min server. It does not make sense for the min server to grow the buffer sizes together with the main http server
@@ -971,9 +1012,6 @@ public class PropServerConfiguration implements ServerConfiguration {
             }
 
             this.defaultSeqPartTxnCount = getInt(properties, env, PropertyKey.CAIRO_DEFAULT_SEQ_PART_TXN_COUNT, 0);
-            // maintain deprecated property name for the time being
-            this.httpNetConnectionLimit = getInt(properties, env, PropertyKey.HTTP_NET_ACTIVE_CONNECTION_LIMIT, 256);
-            this.httpNetConnectionLimit = getInt(properties, env, PropertyKey.HTTP_NET_CONNECTION_LIMIT, this.httpNetConnectionLimit);
             this.httpNetConnectionHint = getBoolean(properties, env, PropertyKey.HTTP_NET_CONNECTION_HINT, false);
             // deprecated
             this.httpNetConnectionTimeout = getMillis(properties, env, PropertyKey.HTTP_NET_IDLE_CONNECTION_TIMEOUT, 5 * 60 * 1000L);
@@ -1495,9 +1533,10 @@ public class PropServerConfiguration implements ServerConfiguration {
             this.sqlParallelFilterPreTouchEnabled = getBoolean(properties, env, PropertyKey.CAIRO_SQL_PARALLEL_FILTER_PRETOUCH_ENABLED, true);
             this.sqlCopyModelPoolCapacity = getInt(properties, env, PropertyKey.CAIRO_SQL_COPY_MODEL_POOL_CAPACITY, 32);
 
-            boolean defaultParallelSqlEnabled = sharedWorkerCount >= 4;
+            final boolean defaultParallelSqlEnabled = sharedWorkerCount >= 4;
             this.sqlParallelFilterEnabled = getBoolean(properties, env, PropertyKey.CAIRO_SQL_PARALLEL_FILTER_ENABLED, defaultParallelSqlEnabled);
             this.sqlParallelGroupByEnabled = getBoolean(properties, env, PropertyKey.CAIRO_SQL_PARALLEL_GROUPBY_ENABLED, defaultParallelSqlEnabled);
+            this.sqlParallelReadParquetEnabled = getBoolean(properties, env, PropertyKey.CAIRO_SQL_PARALLEL_READ_PARQUET_ENABLED, defaultParallelSqlEnabled);
             this.sqlParallelWorkStealingThreshold = getInt(properties, env, PropertyKey.CAIRO_SQL_PARALLEL_WORK_STEALING_THRESHOLD, 16);
             // TODO(puzpuzpuz): consider increasing default Parquet cache capacity
             this.sqlParquetFrameCacheCapacity = Math.max(getInt(properties, env, PropertyKey.CAIRO_SQL_PARQUET_FRAME_CACHE_CAPACITY, 3), 3);
@@ -1737,6 +1776,33 @@ public class PropServerConfiguration implements ServerConfiguration {
         }
     }
 
+    private void validateHttpConnectionLimits(
+            int httpJsonQueryConnectionLimit, int httpIlpConnectionLimit, int httpNetConnectionLimit
+    ) throws ServerConfigurationException {
+        if (httpJsonQueryConnectionLimit > httpNetConnectionLimit) {
+            throw new ServerConfigurationException(
+                    "Json query connection limit cannot be greater than the overall HTTP connection limit ["
+                            + PropertyKey.HTTP_JSON_QUERY_CONNECTION_LIMIT.getPropertyPath() + "=" + httpJsonQueryConnectionLimit + ", "
+                            + PropertyKey.HTTP_NET_CONNECTION_LIMIT.getPropertyPath() + "=" + httpNetConnectionLimit + ']');
+        }
+
+        if (httpIlpConnectionLimit > httpNetConnectionLimit) {
+            throw new ServerConfigurationException(
+                    "HTTP over ILP connection limit cannot be greater than the overall HTTP connection limit ["
+                            + PropertyKey.HTTP_ILP_CONNECTION_LIMIT.getPropertyPath() + "=" + httpIlpConnectionLimit + ", "
+                            + PropertyKey.HTTP_NET_CONNECTION_LIMIT.getPropertyPath() + "=" + httpNetConnectionLimit + ']');
+        }
+
+        if (httpJsonQueryConnectionLimit > -1 && httpIlpConnectionLimit > -1
+                && (httpJsonQueryConnectionLimit + httpIlpConnectionLimit) > httpNetConnectionLimit) {
+            throw new ServerConfigurationException(
+                    "The sum of the json query and HTTP over ILP connection limits cannot be greater than the overall HTTP connection limit ["
+                            + PropertyKey.HTTP_JSON_QUERY_CONNECTION_LIMIT.getPropertyPath() + "=" + httpJsonQueryConnectionLimit + ", "
+                            + PropertyKey.HTTP_ILP_CONNECTION_LIMIT.getPropertyPath() + "=" + httpIlpConnectionLimit + ", "
+                            + PropertyKey.HTTP_NET_CONNECTION_LIMIT.getPropertyPath() + "=" + httpNetConnectionLimit + ']');
+        }
+    }
+
     private void validateProperties(Properties properties, boolean configValidationStrict) throws ServerConfigurationException {
         ValidationResult validation = validator.validate(properties);
         if (validation != null) {
@@ -1894,7 +1960,8 @@ public class PropServerConfiguration implements ServerConfiguration {
         // Sometimes there can be spaces coming from environment variables, cut them off
         result = (result != null) ? result.trim() : null;
         if (!key.isDebug()) {
-            allPairs.put(key, new ConfigPropertyValueImpl(result, valueSource, false));
+            boolean dynamic = dynamicProperties != null && dynamicProperties.contains(key);
+            allPairs.put(key, new ConfigPropertyValueImpl(result, valueSource, dynamic));
         }
         return result;
     }
@@ -3395,6 +3462,11 @@ public class PropServerConfiguration implements ServerConfiguration {
         }
 
         @Override
+        public boolean isSqlParallelReadParquetEnabled() {
+            return sqlParallelReadParquetEnabled;
+        }
+
+        @Override
         public boolean isTableTypeConversionEnabled() {
             return tableTypeConversionEnabled;
         }
@@ -4073,7 +4145,7 @@ public class PropServerConfiguration implements ServerConfiguration {
 
         @Override
         public LongGauge getConnectionCountGauge() {
-            return metrics.lineMetrics().connectionCountGauge();
+            return metrics.lineMetrics().tcpConnectionCountGauge();
         }
 
         @Override
