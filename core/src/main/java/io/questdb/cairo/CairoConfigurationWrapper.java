@@ -1177,6 +1177,11 @@ public class CairoConfigurationWrapper implements CairoConfiguration {
     }
 
     @Override
+    public boolean isQueryTracingEnabled() {
+        return getDelegate().isQueryTracingEnabled();
+    }
+
+    @Override
     public boolean isReadOnlyInstance() {
         return getDelegate().isReadOnlyInstance();
     }
@@ -1214,6 +1219,11 @@ public class CairoConfigurationWrapper implements CairoConfiguration {
     @Override
     public boolean isTableTypeConversionEnabled() {
         return getDelegate().isTableTypeConversionEnabled();
+    }
+
+    @Override
+    public boolean isValidateSampleByFillType() {
+        return getDelegate().isValidateSampleByFillType();
     }
 
     @Override
