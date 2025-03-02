@@ -189,7 +189,7 @@ public class Overrides {
         this.rostiAllocFacade = rostiAllocFacade;
     }
 
-    private static CairoConfiguration getTestConfiguration(String root, Properties defaultProperties, Properties properties) {
+    private static CairoConfiguration getTestConfiguration(String installRoot, Properties defaultProperties, Properties properties) {
         Properties props = new Properties();
         props.putAll(defaultProperties);
         if (properties != null) {
@@ -199,7 +199,7 @@ public class Overrides {
         PropServerConfiguration propCairoConfiguration;
         try {
             propCairoConfiguration = new PropServerConfiguration(
-                    root,
+                    installRoot,
                     props,
                     null,
                     new HashMap<>(),
@@ -239,6 +239,7 @@ public class Overrides {
         properties.setProperty(PropertyKey.CAIRO_SQL_GROUPBY_ALLOCATOR_MAX_CHUNK_SIZE.getPropertyPath(), "1073741824");
         properties.setProperty(PropertyKey.CAIRO_SQL_PARALLEL_GROUPBY_MERGE_QUEUE_CAPACITY.getPropertyPath(), "32");
         properties.setProperty(PropertyKey.CAIRO_SQL_PARALLEL_GROUPBY_SHARDING_THRESHOLD.getPropertyPath(), "1000");
+        properties.setProperty(PropertyKey.CAIRO_ID_GENERATE_STEP.getPropertyPath(), "512");
         properties.setProperty(PropertyKey.CAIRO_IDLE_CHECK_INTERVAL.getPropertyPath(), "100");
         properties.setProperty(PropertyKey.CAIRO_INACTIVE_READER_TTL.getPropertyPath(), "-10000");
         properties.setProperty(PropertyKey.CAIRO_INACTIVE_WRITER_TTL.getPropertyPath(), "-10000");

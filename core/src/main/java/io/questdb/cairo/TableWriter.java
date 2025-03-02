@@ -353,10 +353,12 @@ public class TableWriter implements TableWriterAPI, MetadataService, Closeable {
         this.engine = cairoEngine;
         this.lastWalCommitTimestampMicros = configuration.getMicrosecondClock().getTicks();
         try {
-            this.path = new Path().of(root);
+            this.path = new Path();
+            path.of(root);
             this.pathRootSize = path.size();
             path.concat(tableToken);
-            this.other = new Path().of(root).concat(tableToken);
+            this.other = new Path();
+            other.of(root).concat(tableToken);
             this.pathSize = path.size();
             if (lock) {
                 lock();
@@ -794,7 +796,7 @@ public class TableWriter implements TableWriterAPI, MetadataService, Closeable {
             return AttachDetachStatus.ATTACH_ERR_DIR_EXISTS;
         }
 
-        Path detachedPath = Path.PATH.get().of(configuration.getRoot()).concat(tableToken);
+        Path detachedPath = Path.PATH.get().of(configuration.getDbRoot()).concat(tableToken);
         setPathForNativePartition(detachedPath, partitionBy, timestamp, -1L);
         detachedPath.put(configuration.getAttachPartitionSuffix()).$();
         int detachedRootLen = detachedPath.size();
@@ -1656,7 +1658,7 @@ public class TableWriter implements TableWriterAPI, MetadataService, Closeable {
                 LOG.info().$("detaching partition via unlink [path=").$substr(pathRootSize, path).I$();
             } else {
 
-                detachedPath.of(configuration.getRoot()).concat(tableToken.getDirName());
+                detachedPath.of(configuration.getDbRoot()).concat(tableToken.getDirName());
                 int detachedRootLen = detachedPath.size();
                 // detachedPath: detached partition folder
                 if (!ff.exists(detachedPath.slash$())) {
@@ -1864,11 +1866,12 @@ public class TableWriter implements TableWriterAPI, MetadataService, Closeable {
     }
 
     @Override
-    public void enableDeduplicationWithUpsertKeys(LongList columnsIndexes) {
+    public boolean enableDeduplicationWithUpsertKeys(LongList columnsIndexes) {
         assert txWriter.getLagRowCount() == 0;
         checkDistressed();
         LogRecord logRec = LOG.info().$("enabling row deduplication [table=").utf8(tableToken.getTableName()).$(", columns=[");
 
+        boolean isSubsetOfOldKeys = true;
         try {
             int upsertKeyColumn = columnsIndexes.size();
             for (int i = 0; i < upsertKeyColumn; i++) {
@@ -1883,6 +1886,9 @@ public class TableWriter implements TableWriterAPI, MetadataService, Closeable {
                     throw CairoException.critical(0).put("Invalid column used as deduplicate key, column is dropped [table=")
                             .put(tableToken.getTableName()).put(", columnIndex=").put(dedupColIndex);
                 }
+
+                isSubsetOfOldKeys &= metadata.isDedupKey(dedupColIndex);
+
                 if (i > 0) {
                     logRec.$(',');
                 }
@@ -1914,6 +1920,7 @@ public class TableWriter implements TableWriterAPI, MetadataService, Closeable {
         try (MetadataCacheWriter metadataRW = engine.getMetadataCache().writeLock()) {
             metadataRW.hydrateTable(metadata);
         }
+        return isSubsetOfOldKeys;
     }
 
     public void enforceTtl() {
@@ -4234,9 +4241,18 @@ public class TableWriter implements TableWriterAPI, MetadataService, Closeable {
                 denseSymbolMapWriters.size(),
                 txWriter
         );
-        // In case there are some dirty files left from rolled back transaction
-        // clean the newly created symbol files.
-        w.truncate();
+
+        try {
+            // In case there are some dirty files left from rolled back transaction
+            // clean the newly created symbol files.
+            w.truncate();
+        } catch (Throwable t) {
+            // oh, well, we tried and it failed. this can happen if there is e.g. I/O issue.
+            // we can't do much about it but make sure we close the writer to avoid leaks
+            w.close();
+            throw t;
+        }
+
         denseSymbolMapWriters.add(w);
         symbolMapWriters.extendAndSet(columnCount, w);
     }
@@ -6348,7 +6364,7 @@ public class TableWriter implements TableWriterAPI, MetadataService, Closeable {
             MemoryARW o3IndexMem = o3MemColumns1.get(getSecondaryColumnIndex(columnIndex));
 
             long size;
-            if (null == o3IndexMem) {
+            if (o3IndexMem == null) {
                 // Fixed size column
                 size = o3RowCount << ColumnType.pow2SizeOf(columnType);
             } else {

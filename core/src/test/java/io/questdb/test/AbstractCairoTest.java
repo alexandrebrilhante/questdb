@@ -528,9 +528,12 @@ public abstract class AbstractCairoTest extends AbstractTest {
         memoryUsage = -1;
         forEachNode(QuestDBTestNode::setUpGriffin);
         sqlExecutionContext.setParallelFilterEnabled(configuration.isSqlParallelFilterEnabled());
+        sqlExecutionContext.setParallelGroupByEnabled(configuration.isSqlParallelGroupByEnabled());
+        sqlExecutionContext.setParallelReadParquetEnabled(configuration.isSqlParallelReadParquetEnabled());
         // 30% chance to enable paranoia checking FD mode
         Files.PARANOIA_FD_MODE = new Rnd(System.nanoTime(), System.currentTimeMillis()).nextInt(100) > 70;
         engine.getMetrics().clear();
+        engine.getMatViewGraph().clear();
     }
 
     @After
@@ -1257,6 +1260,12 @@ public abstract class AbstractCairoTest extends AbstractTest {
                 expectAscendingOrder = tsDesc.substring(position + 3).equalsIgnoreCase("asc");
             }
 
+            if (expectAscendingOrder) {
+                Assert.assertEquals(RecordCursorFactory.SCAN_DIRECTION_FORWARD, factory.getScanDirection());
+            } else {
+                Assert.assertEquals(RecordCursorFactory.SCAN_DIRECTION_BACKWARD, factory.getScanDirection());
+            }
+
             int index = factory.getMetadata().getColumnIndexQuiet(expectedTimestamp);
             Assert.assertTrue("Column '" + expectedTimestamp + "' can't be found in metadata", index > -1);
             Assert.assertNotEquals("Expected non-negative value as timestamp index", -1, index);
@@ -1267,6 +1276,7 @@ public abstract class AbstractCairoTest extends AbstractTest {
 
     protected static void assertTimestampColumnValues(RecordCursorFactory factory, SqlExecutionContext sqlExecutionContext, boolean isAscending) throws SqlException {
         int index = factory.getMetadata().getTimestampIndex();
+        Assert.assertEquals(ColumnType.TIMESTAMP, factory.getMetadata().getColumnType(index));
         long timestamp = isAscending ? Long.MIN_VALUE : Long.MAX_VALUE;
         try (RecordCursor cursor = factory.getCursor(sqlExecutionContext)) {
             final Record record = cursor.getRecord();
@@ -1812,7 +1822,7 @@ public abstract class AbstractCairoTest extends AbstractTest {
     }
 
     protected File assertSegmentExistence(boolean expectExists, @NotNull TableToken tableToken, int walId, int segmentId) {
-        final CharSequence root = engine.getConfiguration().getRoot();
+        final CharSequence root = engine.getConfiguration().getDbRoot();
         try (Path path = new Path()) {
             path.of(root).concat(tableToken).concat("wal").put(walId).slash().put(segmentId);
             Assert.assertEquals(Utf8s.toString(path), expectExists, TestFilesFacadeImpl.INSTANCE.exists(path.$()));
@@ -1826,7 +1836,7 @@ public abstract class AbstractCairoTest extends AbstractTest {
     }
 
     protected void assertSegmentLockEngagement(boolean expectLocked, TableToken tableToken, int walId, int segmentId) {
-        final CharSequence root = engine.getConfiguration().getRoot();
+        final CharSequence root = engine.getConfiguration().getDbRoot();
         try (Path path = new Path()) {
             path.of(root).concat(tableToken).concat("wal").put(walId).slash().put(segmentId).put(".lock").$();
             final boolean could = couldObtainLock(path);
@@ -1835,7 +1845,7 @@ public abstract class AbstractCairoTest extends AbstractTest {
     }
 
     protected void assertSegmentLockExistence(boolean expectExists, String tableName, @SuppressWarnings("SameParameterValue") int walId, int segmentId) {
-        final CharSequence root = engine.getConfiguration().getRoot();
+        final CharSequence root = engine.getConfiguration().getDbRoot();
         try (Path path = new Path()) {
             path.of(root).concat(engine.verifyTableName(tableName)).concat("wal").put(walId).slash().put(segmentId).put(".lock");
             Assert.assertEquals(Utf8s.toString(path), expectExists, TestFilesFacadeImpl.INSTANCE.exists(path.$()));
@@ -1911,7 +1921,7 @@ public abstract class AbstractCairoTest extends AbstractTest {
     }
 
     protected void assertTableExistence(boolean expectExists, @NotNull TableToken tableToken) {
-        final CharSequence root = engine.getConfiguration().getRoot();
+        final CharSequence root = engine.getConfiguration().getDbRoot();
         try (Path path = new Path()) {
             path.of(root).concat(tableToken);
             Assert.assertEquals(Utf8s.toString(path), expectExists, TestFilesFacadeImpl.INSTANCE.exists(path.$()));
@@ -1924,7 +1934,7 @@ public abstract class AbstractCairoTest extends AbstractTest {
     }
 
     protected void assertWalExistence(boolean expectExists, @NotNull TableToken tableToken, int walId) {
-        final CharSequence root = engine.getConfiguration().getRoot();
+        final CharSequence root = engine.getConfiguration().getDbRoot();
         try (Path path = new Path()) {
             path.of(root).concat(tableToken).concat("wal").put(walId);
             Assert.assertEquals(Utf8s.toString(path), expectExists, TestFilesFacadeImpl.INSTANCE.exists(path.$()));
@@ -1937,7 +1947,7 @@ public abstract class AbstractCairoTest extends AbstractTest {
     }
 
     protected void assertWalLockEngagement(boolean expectLocked, TableToken tableToken, int walId) {
-        final CharSequence root = engine.getConfiguration().getRoot();
+        final CharSequence root = engine.getConfiguration().getDbRoot();
         try (Path path = new Path()) {
             path.of(root).concat(tableToken).concat("wal").put(walId).put(".lock").$();
             final boolean could = couldObtainLock(path);
@@ -1946,7 +1956,7 @@ public abstract class AbstractCairoTest extends AbstractTest {
     }
 
     protected void assertWalLockExistence(boolean expectExists, String tableName, @SuppressWarnings("SameParameterValue") int walId) {
-        final CharSequence root = engine.getConfiguration().getRoot();
+        final CharSequence root = engine.getConfiguration().getDbRoot();
         try (Path path = new Path()) {
             TableToken tableToken = engine.verifyTableName(tableName);
             path.of(root).concat(tableToken).concat("wal").put(walId).put(".lock");

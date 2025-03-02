@@ -29,6 +29,7 @@ import io.questdb.Metrics;
 import io.questdb.ServerConfiguration;
 import io.questdb.cairo.CairoConfiguration;
 import io.questdb.cairo.CairoEngine;
+import io.questdb.cairo.CairoException;
 import io.questdb.cairo.ColumnType;
 import io.questdb.cairo.CommitMode;
 import io.questdb.cairo.CursorPrinter;
@@ -115,7 +116,6 @@ import io.questdb.std.Rnd;
 import io.questdb.std.StationaryMillisClock;
 import io.questdb.std.StationaryNanosClock;
 import io.questdb.std.Unsafe;
-import io.questdb.std.Zip;
 import io.questdb.std.datetime.microtime.Timestamps;
 import io.questdb.std.datetime.millitime.MillisecondClock;
 import io.questdb.std.str.AbstractCharSequence;
@@ -160,8 +160,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 
 import static io.questdb.test.cutlass.http.HttpUtils.urlEncodeQuery;
-import static io.questdb.test.tools.TestUtils.assertMemoryLeak;
-import static io.questdb.test.tools.TestUtils.drainWalQueue;
+import static io.questdb.test.tools.TestUtils.*;
 import static org.junit.Assert.assertTrue;
 
 public class IODispatcherTest extends AbstractTest {
@@ -901,7 +900,9 @@ public class IODispatcherTest extends AbstractTest {
 
     @Test
     public void testExpNull() throws Exception {
-        testJsonQuery(0, "GET /exp?query=select+null+from+long_sequence(1)&limit=1&src=con HTTP/1.1\r\n" +
+        testJsonQuery(
+                0,
+                "GET /exp?query=select+null+from+long_sequence(1)&limit=1&src=con HTTP/1.1\r\n" +
                         "Host: localhost:9000\r\n" +
                         "Connection: keep-alive\r\n" +
                         "Accept: */*\r\n" +
@@ -3841,11 +3842,11 @@ public class IODispatcherTest extends AbstractTest {
                     long fd = -1;
                     try {
                         fd = new SendAndReceiveRequestBuilder().connectAndSendRequest(request);
-                        TestUtils.assertEventually(() -> Assert.assertNotNull(eventRef.get()), 10);
+                        assertEventually(() -> Assert.assertNotNull(eventRef.get()), 10);
                         nf.close(fd);
                         fd = -1;
                         // Check that I/O dispatcher closes the event once it detects the disconnect.
-                        TestUtils.assertEventually(() -> assertTrue(eventRef.get().isClosedByAtLeastOneSide()), 10);
+                        assertEventually(() -> assertTrue(eventRef.get().isClosedByAtLeastOneSide()), 10);
                     } finally {
                         if (fd > -1) {
                             nf.close(fd);
@@ -5270,7 +5271,6 @@ public class IODispatcherTest extends AbstractTest {
     @Test
     @Ignore("TODO: fix this test. the gzipped expected response makes it hard to change")
     public void testJsonQueryWithCompressedResults1() throws Exception {
-        Zip.init();
         assertMemoryLeak(() -> {
             final NetworkFacade nf = NetworkFacadeImpl.INSTANCE;
             final String baseDir = root;
@@ -5318,7 +5318,6 @@ public class IODispatcherTest extends AbstractTest {
     @Test
     @Ignore("TODO: fix this test. the gzipped expected response makes it hard to change")
     public void testJsonQueryWithCompressedResults2() throws Exception {
-        Zip.init();
         assertMemoryLeak(() -> {
             final NetworkFacade nf = NetworkFacadeImpl.INSTANCE;
             final String baseDir = root;
@@ -5543,8 +5542,18 @@ public class IODispatcherTest extends AbstractTest {
     }
 
     @Test
+    public void testJsonTableReferenceOutOfDate() throws Exception {
+        getSimpleTester().run((engine, sqlExecutionContext) -> testHttpClient.assertGet(
+                "{\"query\":\"select * from test_table_reference_out_of_date();\",\"error\":\"cached query plan cannot be used because table schema has changed [table='test_table_reference_out_of_date']\",\"position\":0}",
+                "select * from test_table_reference_out_of_date();"
+        ));
+    }
+
+    @Test
     public void testJsonUtf8EncodedColumnName() throws Exception {
-        testJsonQuery(0, "GET /query?query=select+0+%D1%80%D0%B5%D0%BA%D0%BE%D1%80%D0%B4%D0%BD%D0%BE+from+long_sequence(10)&limit=0%2C1000&count=true&src=con HTTP/1.1\r\n" +
+        testJsonQuery(
+                0,
+                "GET /query?query=select+0+%D1%80%D0%B5%D0%BA%D0%BE%D1%80%D0%B4%D0%BD%D0%BE+from+long_sequence(10)&limit=0%2C1000&count=true&src=con HTTP/1.1\r\n" +
                         "Host: localhost:9000\r\n" +
                         "Connection: keep-alive\r\n" +
                         "Accept: */*\r\n" +
@@ -5900,6 +5909,75 @@ public class IODispatcherTest extends AbstractTest {
                     queryParams.put("query", "select 42 from long_sequence(1);");
                     testHttpClient.assertGet("/exp", "42\r\n", queryParams, null, null);
                 });
+    }
+
+    @Test
+    public void testOnAllocationExceptionDispatcherDoesNotLeakConnections() throws Exception {
+        LOG.info().$("started maxConnections").$();
+        assertMemoryLeak(() -> {
+            final int activeConnectionLimit = 10;
+
+            final IODispatcherConfiguration configuration = new DefaultIODispatcherConfiguration() {
+                @Override
+                public boolean getHint() {
+                    return true;
+                }
+
+                @Override
+                public int getLimit() {
+                    return activeConnectionLimit;
+                }
+            };
+
+            try (IODispatcher<HttpConnectionContext> dispatcher = IODispatchers.create(
+                    configuration,
+                    (fd, dispatcher1) -> {
+                        // Throw out of memory exception when we reach the limit
+                        throw CairoException.nonCritical().setOutOfMemory(true)
+                                .put("global RSS memory limit exceeded [usage=test]");
+                    }
+            )) {
+                AtomicBoolean serverRunning = new AtomicBoolean(true);
+                SOCountDownLatch serverHaltLatch = new SOCountDownLatch(1);
+
+                new Thread(() -> {
+                    try {
+                        do {
+                            dispatcher.run(0);
+                            dispatcher.processIOQueue(
+                                    (operation, context, dispatcher1) -> handleClientOperation(context, operation, null, dispatcher1)
+                            );
+                        } while (serverRunning.get());
+                    } finally {
+                        serverHaltLatch.countDown();
+                    }
+                }).start();
+
+                LongList openFds = new LongList();
+
+                final long sockAddr = Net.sockaddr("127.0.0.1", 9001);
+                final long buf = Unsafe.malloc(4096, MemoryTag.NATIVE_DEFAULT);
+                try {
+                    for (int i = 0; i < activeConnectionLimit * 2; i++) {
+                        long fd = Net.socketTcp(true);
+                        openFds.add(fd);
+                        LOG.info().$("Connecting socket ").$(i).$(" fd=").$(fd).$();
+                        TestUtils.assertConnect(fd, sockAddr);
+                    }
+                    assertEventually(() -> Assert.assertEquals(0, dispatcher.getConnectionCount()));
+                } finally {
+                    for (int i = 0; i < openFds.size(); i++) {
+                        Net.close(openFds.getQuick(i));
+                    }
+
+                    Net.freeSockAddr(sockAddr);
+                    Unsafe.free(buf, 4096, MemoryTag.NATIVE_DEFAULT);
+                    Assert.assertFalse(configuration.getLimit() < dispatcher.getConnectionCount());
+                    serverRunning.set(false);
+                    serverHaltLatch.await();
+                }
+            }
+        });
     }
 
     @Test
@@ -7822,6 +7900,15 @@ public class IODispatcherTest extends AbstractTest {
     }
 
     @Test
+    public void testTextTableReferenceOutOfDate() throws Exception {
+        getSimpleTester().run((engine, sqlExecutionContext) -> testHttpClient.assertGet(
+                "/exp",
+                "{\"query\":\"select * from test_table_reference_out_of_date();\",\"error\":\"cached query plan cannot be used because table schema has changed [table='test_table_reference_out_of_date']\",\"position\":0}",
+                "select * from test_table_reference_out_of_date();"
+        ));
+    }
+
+    @Test
     public void testTimingsContainsAuthentication() throws Exception {
         nanosecondClock = StationaryNanosClock.INSTANCE;
         testJsonQuery(
@@ -8621,7 +8708,7 @@ public class IODispatcherTest extends AbstractTest {
         DefaultCairoConfiguration configuration = new DefaultTestCairoConfiguration(baseDir);
 
         String telemetry = TelemetryTask.TABLE_NAME;
-        TableToken telemetryTableName = new TableToken(telemetry, telemetry, 0, false, false, false, true);
+        TableToken telemetryTableName = new TableToken(telemetry, telemetry, 0, false, false, false, false, true);
         try (
                 TableReader reader = new TableReader(configuration, telemetryTableName);
                 TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor()

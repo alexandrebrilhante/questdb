@@ -170,6 +170,9 @@ public interface CairoConfiguration {
     CharSequence getDbDirectory(); // env['cairo.root'], defaults to db
 
     @NotNull
+    String getDbRoot(); // some folder with suffix env['cairo.root'] e.g. /.../db
+
+    @NotNull
     DateLocale getDefaultDateLocale();
 
     int getDefaultSeqPartTxnCount();
@@ -219,6 +222,8 @@ public interface CairoConfiguration {
         return IOURingFacadeImpl.INSTANCE;
     }
 
+    int getIdGenerateBatchStep();
+
     long getIdleCheckInterval();
 
     int getInactiveReaderMaxOpenPartitions();
@@ -234,6 +239,12 @@ public interface CairoConfiguration {
     long getInsertModelBatchSize();
 
     int getInsertModelPoolCapacity();
+
+    /**
+     * Installation root, i.e. the directory that usually contains the "conf", "db", etc directories.
+     */
+    @NotNull
+    String getInstallRoot();
 
     int getLatestByQueueCapacity();
 
@@ -251,6 +262,10 @@ public interface CairoConfiguration {
     DateLocale getLogTimestampTimezoneLocale();
 
     TimeZoneRules getLogTimestampTimezoneRules();
+
+    long getMatViewInsertAsSelectBatchSize();
+
+    int getMatViewMaxRecompileAttempts();
 
     int getMaxCrashFiles();
 
@@ -379,9 +394,6 @@ public interface CairoConfiguration {
     int getRndFunctionMemoryMaxPages();
 
     int getRndFunctionMemoryPageSize();
-
-    @NotNull
-    String getRoot(); // some folder with suffix env['cairo.root'] e.g. /.../db
 
     @NotNull
     default RostiAllocFacade getRostiAllocFacade() {
@@ -633,6 +645,10 @@ public interface CairoConfiguration {
 
     boolean isIOURingEnabled();
 
+    boolean isMatViewEnabled();
+
+    boolean isMatViewParallelSqlEnabled();
+
     boolean isMultiKeyDedupEnabled();
 
     boolean isO3QuickSortEnabled();
@@ -686,6 +702,8 @@ public interface CairoConfiguration {
     }
 
     boolean isWalApplyEnabled();
+
+    boolean isWalApplyParallelSqlEnabled();
 
     boolean isWalSupported();
 
